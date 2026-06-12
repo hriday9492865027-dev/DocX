@@ -2,8 +2,8 @@
 import os
 import uuid
 import shutil
-import pythoncom
-import win32com.client
+import sys
+import subprocess
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 
@@ -22,6 +22,55 @@ CORS(app)
 TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'temp')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+# Conditional imports for Windows COM automation
+IS_WINDOWS = sys.platform.startswith('win')
+if IS_WINDOWS:
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        print("win32com or pythoncom not available. Running in LibreOffice-only mode.")
+        IS_WINDOWS = False
+
+# ==========================================
+# --- CROSS-PLATFORM CONVERSION HELPERS ---
+# ==========================================
+
+def convert_with_libreoffice(input_path, output_dir):
+    """Converts a document to PDF using LibreOffice headless command line."""
+    # Find soffice executable path
+    soffice_path = shutil.which('soffice') or shutil.which('libreoffice')
+    
+    if not soffice_path and sys.platform.startswith('win'):
+        # Check standard Windows directories if not in PATH
+        possible_paths = [
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                soffice_path = p
+                break
+                
+    if not soffice_path:
+        raise Exception(
+            "LibreOffice (soffice) CLI not found. Make sure LibreOffice is installed "
+            "and added to system variables/PATH (or MS Office is installed on Windows)."
+        )
+        
+    cmd = [
+        soffice_path,
+        '--headless',
+        '--convert-to', 'pdf',
+        input_path,
+        '--outdir', output_dir
+    ]
+    
+    print(f"Executing LibreOffice conversion: {' '.join(cmd)}")
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise Exception(f"LibreOffice conversion failed: {result.stderr or result.stdout}")
+
 # ==========================================
 # --- CONVERSION ALGORITHMS ---
 # ==========================================
@@ -31,6 +80,35 @@ def pdf_to_docx(pdf_path, docx_path):
     cv = Converter(pdf_path)
     cv.convert(docx_path, start=0, end=None)
     cv.close()
+
+def get_transparent_image_bytes(doc, xref, smask_xref):
+    try:
+        base_pix = fitz.Pixmap(doc, xref)
+        
+        # If it's CMYK and has no smask, convert to RGB
+        if base_pix.colorspace and base_pix.colorspace.n == 4 and smask_xref == 0:
+            rgb_pix = fitz.Pixmap(fitz.csRGB, base_pix)
+            img_bytes = rgb_pix.tobytes("png")
+            return img_bytes
+            
+        if smask_xref > 0:
+            mask_pix = fitz.Pixmap(doc, smask_xref)
+            # Make sure base is RGB before combining (fitz.Pixmap expects RGB base for masking)
+            if base_pix.colorspace and base_pix.colorspace.n != 3:
+                base_pix = fitz.Pixmap(fitz.csRGB, base_pix)
+            
+            pix = fitz.Pixmap(base_pix, mask_pix)
+            img_bytes = pix.tobytes("png")
+            return img_bytes
+        else:
+            # Check colorspace to ensure compatibility with python-pptx (RGB)
+            if base_pix.colorspace and base_pix.colorspace.n != 3:
+                base_pix = fitz.Pixmap(fitz.csRGB, base_pix)
+            img_bytes = base_pix.tobytes("png")
+            return img_bytes
+    except Exception as e:
+        print(f"Error extracting transparent image (xref={xref}, smask={smask_xref}): {e}")
+        return None
 
 # 2. PDF to PPTX (Generates editable text elements and extracts images)
 def pdf_to_pptx(pdf_path, pptx_path):
@@ -50,9 +128,9 @@ def pdf_to_pptx(pdf_path, pptx_path):
             prs.slide_height = Inches(page.rect.height / 72.0)
             
         slide = prs.slides.add_slide(blank_layout)
-        
-        # Extract page layout dictionary (contains detailed spans, fonts, sizes, colors, and images)
         page_dict = page.get_text("dict")
+        img_list = page.get_images(full=True)
+        used_img_indices = set()
         
         for block in page_dict.get("blocks", []):
             block_type = block.get("type", 0)
@@ -69,12 +147,10 @@ def pdf_to_pptx(pdf_path, pptx_path):
                 if not lines:
                     continue
                     
-                # Create PowerPoint Text Box
                 txBox = slide.shapes.add_textbox(left, top, width, height)
                 tf = txBox.text_frame
                 tf.word_wrap = True
                 
-                # Set narrow margins to closely align with PDF spacing
                 tf.margin_left = Inches(0.02)
                 tf.margin_right = Inches(0.02)
                 tf.margin_top = Inches(0.02)
@@ -85,7 +161,6 @@ def pdf_to_pptx(pdf_path, pptx_path):
                     if not spans:
                         continue
                         
-                    # Create or select paragraph
                     if i == 0:
                         p = tf.paragraphs[0]
                     else:
@@ -96,21 +171,16 @@ def pdf_to_pptx(pdf_path, pptx_path):
                         if not span_text:
                             continue
                             
-                        # Add a text run inside the paragraph
                         run = p.add_run()
                         run.text = span_text
-                        
-                        # Configure font properties
                         run.font.size = Pt(span.get("size", 12))
                         
-                        # Set font color if present
                         color_int = span.get("color", 0)
                         r = (color_int >> 16) & 255
                         g = (color_int >> 8) & 255
                         b = color_int & 255
                         run.font.color.rgb = RGBColor(r, g, b)
                         
-                        # Simple font mapping & flags (Bold / Italic detection)
                         font_name = span.get("font", "").lower()
                         if "bold" in font_name:
                             run.font.bold = True
@@ -119,6 +189,32 @@ def pdf_to_pptx(pdf_path, pptx_path):
                             
             elif block_type == 1:  # Image block
                 image_bytes = block.get("image", None)
+                
+                # Match image by aspect ratio to extract transparency if available
+                xref = None
+                smask_xref = 0
+                block_width = block.get("width", 1)
+                block_height = block.get("height", 1)
+                block_aspect = block_width / block_height if block_height > 0 else 1
+                
+                for idx, img in enumerate(img_list):
+                    if idx in used_img_indices:
+                        continue
+                    img_width = img[2]
+                    img_height = img[3]
+                    if img_height > 0:
+                        img_aspect = img_width / img_height
+                        if abs(block_aspect - img_aspect) < 0.02:
+                            xref = img[0]
+                            smask_xref = img[1]
+                            used_img_indices.add(idx)
+                            break
+                            
+                if xref is not None:
+                    transparent_bytes = get_transparent_image_bytes(doc, xref, smask_xref)
+                    if transparent_bytes:
+                        image_bytes = transparent_bytes
+                        
                 if image_bytes:
                     try:
                         slide.shapes.add_picture(io.BytesIO(image_bytes), left, top, width, height)
@@ -146,7 +242,6 @@ def pdf_to_xlsx(pdf_path, xlsx_path):
                 row_idx += 2 # spacing between tables
                 
             if not tables:
-                # Text extraction fallback
                 text = page.extract_text()
                 if text:
                     for line in text.split('\n'):
@@ -161,49 +256,88 @@ def pdf_to_xlsx(pdf_path, xlsx_path):
         wb.create_sheet(title="Sheet 1")
     wb.save(xlsx_path)
 
-# 4. DOCX to PDF (Using Word COM automation)
+# 4. DOCX to PDF
 def docx_to_pdf(docx_path, pdf_path):
-    pythoncom.CoInitialize()
-    try:
-        word = win32com.client.Dispatch("Word.Application")
-        word.Visible = False
-        doc = word.Documents.Open(os.path.abspath(docx_path))
-        doc.SaveAs(os.path.abspath(pdf_path), FileFormat=17) # 17 is wdFormatPDF
-        doc.Close()
-        word.Quit()
-    except Exception as e:
-        raise Exception(f"Microsoft Word export failed: {str(e)}. Make sure MS Word is installed.")
-    finally:
-        pythoncom.CoUninitialize()
+    if IS_WINDOWS:
+        try:
+            pythoncom.CoInitialize()
+            word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False
+            doc = word.Documents.Open(os.path.abspath(docx_path))
+            doc.SaveAs(os.path.abspath(pdf_path), FileFormat=17) # 17 is wdFormatPDF
+            doc.Close()
+            word.Quit()
+            return
+        except Exception as e:
+            print(f"Windows COM automation failed: {e}. Falling back to LibreOffice CLI...")
+        finally:
+            pythoncom.CoUninitialize()
+            
+    # Linux / Fallback: Run LibreOffice
+    output_dir = os.path.dirname(pdf_path)
+    convert_with_libreoffice(docx_path, output_dir)
+    
+    filename_no_ext = os.path.basename(docx_path).rsplit('.', 1)[0]
+    expected_out = os.path.join(output_dir, f"{filename_no_ext}.pdf")
+    if os.path.exists(expected_out):
+        shutil.move(expected_out, pdf_path)
+    else:
+        raise Exception("LibreOffice CLI did not produce PDF output.")
 
-# 5. PPTX to PDF (Using PowerPoint COM automation)
+# 5. PPTX to PDF
 def pptx_to_pdf(pptx_path, pdf_path):
-    pythoncom.CoInitialize()
-    try:
-        powerpoint = win32com.client.Dispatch("PowerPoint.Application")
-        pres = powerpoint.Presentations.Open(os.path.abspath(pptx_path), WithWindow=False)
-        pres.SaveAs(os.path.abspath(pdf_path), FileFormat=32) # 32 is ppSaveAsPDF
-        pres.Close()
-        powerpoint.Quit()
-    except Exception as e:
-        raise Exception(f"Microsoft PowerPoint export failed: {str(e)}. Make sure MS PowerPoint is installed.")
-    finally:
-        pythoncom.CoUninitialize()
+    if IS_WINDOWS:
+        try:
+            pythoncom.CoInitialize()
+            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+            pres = powerpoint.Presentations.Open(os.path.abspath(pptx_path), WithWindow=False)
+            pres.SaveAs(os.path.abspath(pdf_path), FileFormat=32) # 32 is ppSaveAsPDF
+            pres.Close()
+            powerpoint.Quit()
+            return
+        except Exception as e:
+            print(f"Windows COM automation failed: {e}. Falling back to LibreOffice CLI...")
+        finally:
+            pythoncom.CoUninitialize()
+            
+    # Linux / Fallback: Run LibreOffice
+    output_dir = os.path.dirname(pdf_path)
+    convert_with_libreoffice(pptx_path, output_dir)
+    
+    filename_no_ext = os.path.basename(pptx_path).rsplit('.', 1)[0]
+    expected_out = os.path.join(output_dir, f"{filename_no_ext}.pdf")
+    if os.path.exists(expected_out):
+        shutil.move(expected_out, pdf_path)
+    else:
+        raise Exception("LibreOffice CLI did not produce PDF output.")
 
-# 6. XLSX to PDF (Using Excel COM automation)
+# 6. XLSX to PDF
 def xlsx_to_pdf(xlsx_path, pdf_path):
-    pythoncom.CoInitialize()
-    try:
-        excel = win32com.client.Dispatch("Excel.Application")
-        excel.Visible = False
-        wb = excel.Workbooks.Open(os.path.abspath(xlsx_path))
-        wb.ExportAsFixedFormat(0, os.path.abspath(pdf_path)) # 0 is xlTypePDF
-        wb.Close(SaveChanges=False)
-        excel.Quit()
-    except Exception as e:
-        raise Exception(f"Microsoft Excel export failed: {str(e)}. Make sure MS Excel is installed.")
-    finally:
-        pythoncom.CoUninitialize()
+    if IS_WINDOWS:
+        try:
+            pythoncom.CoInitialize()
+            excel = win32com.client.Dispatch("Excel.Application")
+            excel.Visible = False
+            wb = excel.Workbooks.Open(os.path.abspath(xlsx_path))
+            wb.ExportAsFixedFormat(0, os.path.abspath(pdf_path)) # 0 is xlTypePDF
+            wb.Close(SaveChanges=False)
+            excel.Quit()
+            return
+        except Exception as e:
+            print(f"Windows COM automation failed: {e}. Falling back to LibreOffice CLI...")
+        finally:
+            pythoncom.CoUninitialize()
+            
+    # Linux / Fallback: Run LibreOffice
+    output_dir = os.path.dirname(pdf_path)
+    convert_with_libreoffice(xlsx_path, output_dir)
+    
+    filename_no_ext = os.path.basename(xlsx_path).rsplit('.', 1)[0]
+    expected_out = os.path.join(output_dir, f"{filename_no_ext}.pdf")
+    if os.path.exists(expected_out):
+        shutil.move(expected_out, pdf_path)
+    else:
+        raise Exception("LibreOffice CLI did not produce PDF output.")
 
 # ==========================================
 # --- ROUTE HANDLERS ---
@@ -273,5 +407,7 @@ def convert_file():
             print(f"Failed to delete temp files: {cleanup_err}")
 
 if __name__ == '__main__':
-    print("AetherPDF Python backend listening on http://localhost:5000...")
-    app.run(port=5000, debug=False)
+    # Binding to 0.0.0.0 is necessary for running inside Docker
+    port = int(os.environ.get("PORT", 5000))
+    print(f"AetherPDF Python backend listening on http://0.0.0.0:{port}...")
+    app.run(host="0.0.0.0", port=port, debug=False)

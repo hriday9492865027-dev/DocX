@@ -400,9 +400,22 @@ document.addEventListener('DOMContentLoaded', () => {
     clearLogs();
     setProgress(0);
 
+    // Determine the backend URL dynamically
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const urlParams = new URLSearchParams(window.location.search);
+    const queryBackend = urlParams.get('backend');
+    if (queryBackend) {
+      localStorage.setItem('aetherpdf_backend_url', queryBackend);
+    }
+    
+    const customBackendUrl = localStorage.getItem('aetherpdf_backend_url');
+    const backendUrl = customBackendUrl || (isLocal 
+      ? 'http://localhost:5000' 
+      : 'https://docx-backend-hriday.onrender.com');
+
     addLog(`Initializing Python Neural Engine...`);
     addLog(`Payload: ${selectedFile.name} (${formatBytes(selectedFile.size)})`);
-    addLog(`Connecting to local conversion server at http://localhost:5000/convert...`);
+    addLog(`Connecting to conversion server at ${backendUrl}/convert...`);
 
     // Simulate progress increments during backend processing
     let progress = 0;
@@ -432,7 +445,7 @@ document.addEventListener('DOMContentLoaded', () => {
       formData.append('file', selectedFile);
       formData.append('mode', activeMode);
 
-      const response = await fetch('http://localhost:5000/convert', {
+      const response = await fetch(`${backendUrl}/convert`, {
         method: 'POST',
         body: formData
       });
@@ -471,7 +484,7 @@ document.addEventListener('DOMContentLoaded', () => {
       clearInterval(progressInterval);
       console.error(err);
       addLog(`[Python Error] ${err.message}`, 'error');
-      addLog(`Please ensure python app.py is running on port 5000 and MS Office is installed.`, 'warn');
+      addLog(`Please ensure the conversion server at ${backendUrl} is running and reachable.`, 'warn');
       setTimeout(() => {
         alert(`Failed: ${err.message}`);
         resetWorkspaceStates();
