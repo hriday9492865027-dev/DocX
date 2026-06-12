@@ -32,26 +32,99 @@ def pdf_to_docx(pdf_path, docx_path):
     cv.convert(docx_path, start=0, end=None)
     cv.close()
 
-# 2. PDF to PPTX
+# 2. PDF to PPTX (Generates editable text elements and extracts images)
 def pdf_to_pptx(pdf_path, pptx_path):
+    from pptx.util import Pt
+    from pptx.dml.color import RGBColor
+    
     doc = fitz.open(pdf_path)
     prs = Presentation()
     blank_layout = prs.slide_layouts[6] # blank layout
     
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        pix = page.get_pixmap(dpi=150)
-        img_data = pix.tobytes("png")
         
-        # Match dimensions (72 points = 1 inch)
+        # Set slide size to match page size (72 points = 1 inch)
         if page_num == 0:
             prs.slide_width = Inches(page.rect.width / 72.0)
             prs.slide_height = Inches(page.rect.height / 72.0)
             
         slide = prs.slides.add_slide(blank_layout)
-        img_stream = io.BytesIO(img_data)
-        slide.shapes.add_picture(img_stream, Inches(0), Inches(0), prs.slide_width, prs.slide_height)
         
+        # Extract page layout dictionary (contains detailed spans, fonts, sizes, colors, and images)
+        page_dict = page.get_text("dict")
+        
+        for block in page_dict.get("blocks", []):
+            block_type = block.get("type", 0)
+            bbox = block.get("bbox", (0, 0, 0, 0))
+            x0, y0, x1, y1 = bbox
+            
+            left = Inches(x0 / 72.0)
+            top = Inches(y0 / 72.0)
+            width = Inches((x1 - x0) / 72.0)
+            height = Inches((y1 - y0) / 72.0)
+            
+            if block_type == 0:  # Text block
+                lines = block.get("lines", [])
+                if not lines:
+                    continue
+                    
+                # Create PowerPoint Text Box
+                txBox = slide.shapes.add_textbox(left, top, width, height)
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                
+                # Set narrow margins to closely align with PDF spacing
+                tf.margin_left = Inches(0.02)
+                tf.margin_right = Inches(0.02)
+                tf.margin_top = Inches(0.02)
+                tf.margin_bottom = Inches(0.02)
+                
+                for i, line in enumerate(lines):
+                    spans = line.get("spans", [])
+                    if not spans:
+                        continue
+                        
+                    # Create or select paragraph
+                    if i == 0:
+                        p = tf.paragraphs[0]
+                    else:
+                        p = tf.add_paragraph()
+                        
+                    for span in spans:
+                        span_text = span.get("text", "")
+                        if not span_text:
+                            continue
+                            
+                        # Add a text run inside the paragraph
+                        run = p.add_run()
+                        run.text = span_text
+                        
+                        # Configure font properties
+                        run.font.size = Pt(span.get("size", 12))
+                        
+                        # Set font color if present
+                        color_int = span.get("color", 0)
+                        r = (color_int >> 16) & 255
+                        g = (color_int >> 8) & 255
+                        b = color_int & 255
+                        run.font.color.rgb = RGBColor(r, g, b)
+                        
+                        # Simple font mapping & flags (Bold / Italic detection)
+                        font_name = span.get("font", "").lower()
+                        if "bold" in font_name:
+                            run.font.bold = True
+                        if "italic" in font_name:
+                            run.font.italic = True
+                            
+            elif block_type == 1:  # Image block
+                image_bytes = block.get("image", None)
+                if image_bytes:
+                    try:
+                        slide.shapes.add_picture(io.BytesIO(image_bytes), left, top, width, height)
+                    except Exception as img_err:
+                        print(f"Failed to insert PDF image block: {img_err}")
+                        
     prs.save(pptx_path)
 
 # 3. PDF to XLSX
