@@ -184,7 +184,7 @@ def pdf_to_pptx(pdf_path, pptx_path):
                 smask_xref = img[1]
                 used_img_indices.add(best_idx)
                 
-            if xref is not None:
+            if xref is not None and smask_xref > 0:
                 transparent_bytes = get_transparent_image_bytes(doc, xref, smask_xref)
                 if transparent_bytes:
                     image_bytes = transparent_bytes
