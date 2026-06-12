@@ -1,0 +1,63 @@
+/* Custom AetherPDF Visual Styles */
+
+body {
+    background-color: #050505;
+    color: #e5e2e1;
+    overflow-x: hidden;
+    font-family: 'Geist', sans-serif;
+}
+
+.glass-panel {
+    background: rgba(15, 23, 42, 0.4);
+    backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-card {
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(40px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    transition: all 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.glass-card:hover {
+    border-color: rgba(46, 91, 255, 0.5);
+    background: rgba(255, 255, 255, 0.05);
+    transform: translateY(-4px);
+    box-shadow: 0 10px 40px -10px rgba(46, 91, 255, 0.2);
+}
+
+.specular-button {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0) 100%);
+    border-top: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.gradient-text {
+    background: linear-gradient(to right, #b8c3ff, #ddb7ff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+::-webkit-scrollbar {
+    width: 4px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: #2a2a2a;
+    border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #434656;
+}
+
+@keyframes pulse-glow {
+    0% { box-shadow: 0 0 15px rgba(137, 206, 255, 0.2); }
+    50% { box-shadow: 0 0 30px rgba(137, 206, 255, 0.4); }
+    100% { box-shadow: 0 0 15px rgba(137, 206, 255, 0.2); }
+}
+
+.ai-pulse {
+    animation: pulse-glow 3s infinite ease-in-out;
+}
