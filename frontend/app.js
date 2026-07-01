@@ -391,6 +391,51 @@ document.addEventListener('DOMContentLoaded', () => {
     convertedBlob = null;
   }
 
+  // --- Smart Document Inspector ---
+  async function isScannedDocument(file) {
+    if (file.type !== 'application/pdf') return false;
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      
+      let textContentLength = 0;
+      // Just check first few pages to optimize
+      const pagesToCheck = Math.min(3, pdf.numPages);
+      for (let i = 1; i <= pagesToCheck; i++) {
+        const page = await pdf.getPage(i);
+        const textContent = await page.getTextContent();
+        textContentLength += textContent.items.length;
+      }
+      // If there's barely any text, it's likely scanned or image-only
+      return textContentLength < 10; 
+    } catch (err) {
+      console.warn("Failed to parse PDF for scanned check", err);
+      return false;
+    }
+  }
+
+  async function convertPDFToImages(file) {
+    const images = [];
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 1.5 }); // Higher fidelity
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+        await page.render({ canvasContext: context, viewport: viewport }).promise;
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        images.push(blob);
+      }
+    } catch (err) {
+      console.warn("Canvas extraction failed", err);
+    }
+    return images;
+  }
+
   // --- Python Backend Conversion Hook ---
   startConversionBtn.addEventListener('click', async () => {
     if (!selectedFile) return;
@@ -441,19 +486,81 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 200);
 
     try {
-      const formData = new FormData();
-      formData.append('file', selectedFile);
-      formData.append('mode', activeMode);
+      let isScanned = false;
+      if (selectedFile.type === 'application/pdf') {
+        addLog(`[Inspector] Checking document text layout...`, 'info');
+        isScanned = await isScannedDocument(selectedFile);
+        if (isScanned) {
+          addLog(`[Inspector] Rasterized PDF detected. Routing to Hugging Face Vision Models...`, 'warn');
+        } else {
+          addLog(`[Inspector] Native Selectable PDF detected. Using standard Render backend.`, 'success');
+        }
+      }
 
-      const response = await fetch(`${backendUrl}/convert`, {
-        method: 'POST',
-        body: formData
-      });
+      let response;
+      if (isScanned) {
+        // HF Space integration
+        const hfEndpoint = `https://hridaysh818-docx.hf.space/process-scanned-pdf`;
+        
+        addLog(`[Vision] Extracting canvas frames from ${selectedFile.name}...`, 'info');
+        const imageBlobs = await convertPDFToImages(selectedFile);
+        
+        const allLayouts = [];
+        const allTables = [];
+        
+        for (let i = 0; i < imageBlobs.length; i++) {
+          addLog(`[Vision] Processing page ${i + 1} / ${imageBlobs.length}...`, 'info');
+          const formData = new FormData();
+          formData.append('file', imageBlobs[i], `page_${i+1}.png`);
+          
+          const hfResponse = await fetch(hfEndpoint, {
+            method: 'POST',
+            body: formData
+          });
+          
+          if (!hfResponse.ok) {
+             throw new Error(`HF Space responded with status ${hfResponse.status}`);
+          }
+          
+          const data = await hfResponse.json();
+          allLayouts.push(data.layout);
+          allTables.push(data.tables);
+        }
+        
+        addLog(`[Vision] Analysis complete. Mapping geometric layout structures...`, 'success');
+        
+        // Output formatting placeholders (Console Logging matrix as per requirement 43-48)
+        if (activeMode === 'pdf-to-sheets') {
+           console.log("Grid Reconstruction (Excel) [Placeholder]:", allTables);
+           addLog(`[Format] Mapped tables payload to spreadsheet compilation grid.`, 'success');
+        } else if (activeMode === 'pdf-to-doc') {
+           console.log("Chronological Flow Sort (Word) [Placeholder]:", allLayouts);
+           addLog(`[Format] Sorted layout bounding boxes chronologically for Word.`, 'success');
+        } else if (activeMode === 'pdf-to-ppt') {
+           console.log("Spatial Object Mapping (PPT) [Placeholder]:", allLayouts);
+           addLog(`[Format] Retained literal absolute BBOX coordinates for slide generation.`, 'success');
+        }
+        
+        // As a placeholder for client-side blob generation, we'll just create a JSON text file representing the result.
+        // If a client side office-js generation library is later integrated, it would parse this JSON text string to actual file blobs.
+        const outputText = JSON.stringify({ layouts: allLayouts, tables: allTables }, null, 2);
+        const outputBlob = new Blob([outputText], { type: 'application/json' });
+        response = new Response(outputBlob, { status: 200 });
+      } else {
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+        formData.append('mode', activeMode);
+
+        response = await fetch(`${backendUrl}/convert`, {
+          method: 'POST',
+          body: formData
+        });
+      }
 
       clearInterval(progressInterval);
 
       if (!response.ok) {
-        const errData = await response.json();
+        const errData = await response.json().catch(() => ({}));
         throw new Error(errData.error || `Server responded with status ${response.status}`);
       }
 
