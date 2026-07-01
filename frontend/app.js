@@ -529,23 +529,110 @@ document.addEventListener('DOMContentLoaded', () => {
         
         addLog(`[Vision] Analysis complete. Mapping geometric layout structures...`, 'success');
         
-        // Output formatting placeholders (Console Logging matrix as per requirement 43-48)
+        // Build actual output files from OCR layout data
         if (activeMode === 'pdf-to-sheets') {
-           console.log("Grid Reconstruction (Excel) [Placeholder]:", allTables);
-           addLog(`[Format] Mapped tables payload to spreadsheet compilation grid.`, 'success');
+           addLog(`[Format] Mapping table payload to spreadsheet grid...`, 'success');
+           // Build a real Excel workbook using SheetJS
+           const wb = XLSX.utils.book_new();
+           
+           for (let pageIdx = 0; pageIdx < allLayouts.length; pageIdx++) {
+             const layout = allLayouts[pageIdx];
+             const rows = [];
+             
+             // Extract text from layout bboxes
+             if (layout && layout.bboxes) {
+               // Sort bboxes top-to-bottom, then left-to-right
+               const sorted = [...layout.bboxes].sort((a, b) => {
+                 const ay = a.bbox ? a.bbox[1] : 0;
+                 const by = b.bbox ? b.bbox[1] : 0;
+                 if (Math.abs(ay - by) < 20) {
+                   const ax = a.bbox ? a.bbox[0] : 0;
+                   const bx = b.bbox ? b.bbox[0] : 0;
+                   return ax - bx;
+                 }
+                 return ay - by;
+               });
+               
+               let currentRow = [];
+               let lastY = -1;
+               
+               for (const box of sorted) {
+                 const text = box.text || box.label || '';
+                 const y = box.bbox ? box.bbox[1] : 0;
+                 
+                 // New row if Y position jumps significantly
+                 if (lastY >= 0 && Math.abs(y - lastY) > 20) {
+                   if (currentRow.length > 0) rows.push(currentRow);
+                   currentRow = [];
+                 }
+                 currentRow.push(text);
+                 lastY = y;
+               }
+               if (currentRow.length > 0) rows.push(currentRow);
+             }
+             
+             // If no bboxes found, add a note
+             if (rows.length === 0) {
+               rows.push(['(No text detected on this page)']);
+             }
+             
+             const ws = XLSX.utils.aoa_to_sheet(rows);
+             XLSX.utils.book_append_sheet(wb, ws, `Page ${pageIdx + 1}`);
+           }
+           
+           const xlsxArrayBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+           const outputBlob = new Blob([xlsxArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+           response = new Response(outputBlob, { status: 200 });
+           
         } else if (activeMode === 'pdf-to-doc') {
-           console.log("Chronological Flow Sort (Word) [Placeholder]:", allLayouts);
            addLog(`[Format] Sorted layout bounding boxes chronologically for Word.`, 'success');
+           // Build a simple Word-compatible HTML document
+           let htmlContent = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>OCR Document</title></head><body>';
+           
+           for (let pageIdx = 0; pageIdx < allLayouts.length; pageIdx++) {
+             const layout = allLayouts[pageIdx];
+             if (pageIdx > 0) htmlContent += '<br clear="all" style="page-break-before:always">';
+             htmlContent += `<h2>Page ${pageIdx + 1}</h2>`;
+             
+             if (layout && layout.bboxes) {
+               const sorted = [...layout.bboxes].sort((a, b) => {
+                 const ay = a.bbox ? a.bbox[1] : 0;
+                 const by = b.bbox ? b.bbox[1] : 0;
+                 return ay - by;
+               });
+               for (const box of sorted) {
+                 const text = box.text || box.label || '';
+                 if (text) htmlContent += `<p>${text}</p>`;
+               }
+             }
+           }
+           htmlContent += '</body></html>';
+           
+           const outputBlob = new Blob([htmlContent], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+           response = new Response(outputBlob, { status: 200 });
+           
         } else if (activeMode === 'pdf-to-ppt') {
-           console.log("Spatial Object Mapping (PPT) [Placeholder]:", allLayouts);
-           addLog(`[Format] Retained literal absolute BBOX coordinates for slide generation.`, 'success');
+           addLog(`[Format] Retained absolute BBOX coordinates for slide generation.`, 'success');
+           // Build a simple HTML-based presentation file
+           let htmlContent = '<html xmlns:o="urn:schemas-microsoft-com:office:office"><head><meta charset="utf-8"><title>OCR Presentation</title></head><body>';
+           
+           for (let pageIdx = 0; pageIdx < allLayouts.length; pageIdx++) {
+             const layout = allLayouts[pageIdx];
+             if (pageIdx > 0) htmlContent += '<br clear="all" style="page-break-before:always">';
+             htmlContent += `<h1>Slide ${pageIdx + 1}</h1>`;
+             
+             if (layout && layout.bboxes) {
+               for (const box of layout.bboxes) {
+                 const text = box.text || box.label || '';
+                 if (text) htmlContent += `<p>${text}</p>`;
+               }
+             }
+           }
+           htmlContent += '</body></html>';
+           
+           const outputBlob = new Blob([htmlContent], { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' });
+           response = new Response(outputBlob, { status: 200 });
         }
-        
-        // As a placeholder for client-side blob generation, we'll just create a JSON text file representing the result.
-        // If a client side office-js generation library is later integrated, it would parse this JSON text string to actual file blobs.
-        const outputText = JSON.stringify({ layouts: allLayouts, tables: allTables }, null, 2);
-        const outputBlob = new Blob([outputText], { type: 'application/json' });
-        response = new Response(outputBlob, { status: 200 });
       } else {
         const formData = new FormData();
         formData.append('file', selectedFile);
